@@ -1,11 +1,4 @@
-class Node(object):
-    def __init__(self, data):
-        self.data = data
-        self.children = []
-
-    def add_child(self, obj):
-        self.children.append(obj)
-
+import re
 
 def getClauses(datalog_query):
     '''
@@ -38,41 +31,24 @@ def getTermsInParens(a):
             results.append(term)
     return results
 
+def getColsFromHead(head):
+    cols = getTermsInParens(head)
+    return cols
+
 def getPredPerTerm(term):
     predicate = ''
     if term.find('(') != -1 and term.find(')') != -1:
         predicate = term.split('(')[0]
     return predicate
 
-def parseDatalog2Tree(clauses):
-    '''
-    type list[string]: clauses
-    rtype Node: n
-    '''
-    n = Node(seperateHeadBody(clauses[0])[0])
-    for literal in seperateHeadBody(clauses[0])[1].split(', '):
-        n.add_child(literal)
-    return n
-
-def mapFactSchema(factList, inputSchemas):
-    '''
-    Description: make a dictionary to contain the fact schama and corresponds fact
-    type list: factList
-    type list: inputSchema
-    '''
-    results = {}
-    for fact in factList:
-        pred = getPredPerTerm(fact)
-        for schema in inputSchemas:
-            if schema.find(pred) != -1:
-                for i in range(len(getTermsInParens(schema))):
-                    key = pred + "." + getTermsInParens(schema)[i]
-                    if key in results:
-                        results[key].append(getTermsInParens(fact)[i])
-                    else:
-                        results[key] = [getTermsInParens(fact)[i]]
-    return results
-
+def getTabsPerBody(body):
+    tabs = []
+    bodyLiterals = body.split(', ')
+    for bodyLiteral in bodyLiterals:
+        if bodyLiteral.find('(') != -1 and bodyLiteral.find(')') != -1:
+            predicate = bodyLiteral.split('(')[0]
+            tabs.append(predicate)
+    return tabs
 
 def getSchemaDict(inputSchemas):
     '''
@@ -89,61 +65,97 @@ def getSchemaDict(inputSchemas):
             schemaDict[pred] = getTermsInParens(schema)
     return schemaDict
 
-
-def translateDatalog2Sql(n, factList, inputSchemas):
+def getBodyDict(body):
     '''
-    type Node: n
-    type list: inputSchemas
-    type list: factList
-    rtype sqlQuery: string
+    Description: create a dictionary to contain predicate-term pair
+    type string: body
+    rtype dict: bodyDict
     '''
-    schemaDict = getSchemaDict(inputSchemas)
-    factSchemaDict = mapFactSchema(factList, inputSchemas)
-    sqlQuery = ''
-    sqlQueryFrom = 'From '
-    sqlQueryWhere = 'Where '
-    sqlQuerySelect = 'Select '
-    duplicateTerms = {}
-    head = getPredPerTerm(n.data)
-    sqlQueryView = 'Create View ' + head + ' as('
-    headTerms = getTermsInParens(n.data)
-    colNums = len(headTerms)
-    i = 1
-    for children in n.children:
-        tab = getPredPerTerm(children)
-        sqlQueryFrom += tab + ', '
-        terms = getTermsInParens(children)
-        # Update where clause
-        for termPos in range(len(terms)):
-            termCol = tab + '.' + terms[termPos]
-            if termCol not in factSchemaDict:
-                ### Need to edit
-                sqlQueryWhere += tab + '.' + schemaDict[tab][termPos] + '=' + terms[termPos]  +" and "
-            if terms[termPos] not in duplicateTerms:
-                duplicateTerms[terms[termPos]] = termCol
-            else:
-                sqlQueryWhere += duplicateTerms[terms[termPos]] + "=" + termCol + " and "
-        # Update select clause
-        for term in terms:
-            if term in headTerms and i <= 2:
-                sqlQuerySelect += termCol + ", "
-                i += 1
+    bodyDict = {}
+    bodyLiterals = body.split(', ')
+    for bodyLiteral in bodyLiterals:
+        if bodyLiteral.find('(') != -1 and bodyLiteral.find(')') != -1:
+            predicate = bodyLiteral.split('(')[0]
+            bodyDict[predicate] = bodyLiteral[bodyLiteral.find('(')+1:bodyLiteral.find(')')].split(',')
+        else:
+            bodyDict[bodyLiteral] = bodyLiteral
+    return bodyDict
 
-    sqlQuery += sqlQueryView + "\n" + sqlQueryFrom.strip(', ') + "\n" + sqlQueryWhere.strip(' and ') + "\n" + sqlQuerySelect.strip(', ') + ')'
-    return sqlQuery
+def getSelectQuery(cols, bodyDict):
+    '''
+    Description: generate clause
+    type list[string]: cols
+    type dict: bodyDict
+    rtype string: selectCaluse
+    '''
+    selectClause = 'select '
+    for col in cols:
+        for pred in bodyDict.keys():
+            if col in bodyDict[pred]:
+                selectClause += pred + '.' + col + ', '
+                break
+    selectClause = selectClause.strip(', ')
+    return selectClause
 
-def mainCode(datalog, factList, inputSchemas):
+def getFromQuery(body):
+    '''
+    Descrption: generate from clause
+    type string: body
+    rtype string: fromClause
+    '''
+    fromClause = 'from '
+    for tab in getTabsPerBody(body):
+        fromClause += tab + ', '
+    fromClause = fromClause.strip(', ')
+    return fromClause
+
+def getWhereQuery(bodyDict, schemaDict):
+    '''
+    Description: generate where clause
+    type dict: bodyDict
+    type dict: schemaDict
+    rtype string: whereClause
+    '''
+    split_comp = ">|<|="
+    dictCol = {}
+    whereClause = 'where '
+    for pred in bodyDict.keys():
+        if len(re.findall(split_comp, pred))==0:
+            for term in bodyDict[pred]:
+                if term not in dictCol and term in schemaDict[pred]:
+                    dictCol[term] = pred
+                elif term in dictCol and term in schemaDict[pred]:
+                    whereClause += dictCol[term] + '.' + term + '=' + pred + '.' + term + ' and '
+                # specify constant
+                elif term not in schemaDict[pred]:
+                    pos = bodyDict[pred].index(term)
+                    whereClause += pred + '.'+ schemaDict[pred][pos] + '=' + term + ' and '
+        # translate built-in predicate
+        else:
+            term = re.split(split_comp,pred)[0]
+            term = term.strip(' ')
+            whereClause += dictCol[term] + '.' + pred + ' and '
+    whereClause = whereClause.strip(' and ')
+    return whereClause
+
+def mainCode(datalog,inputSchemas):
+    schemaDict = getBodyDict(inputSchemas)
     clauses = getClauses(datalog)
-    n = parseDatalog2Tree(clauses)
-    sqlQuery = translateDatalog2Sql(n, factList, inputSchemas)
-    print(sqlQuery)
-
+    head = seperateHeadBody(clauses[0])[0]
+    cols = getColsFromHead(head)
+    body = seperateHeadBody(clauses[0])[1]
+    bodyDict = getBodyDict(body)
+    selectClause = getSelectQuery(cols, bodyDict)
+    fromClause = getFromQuery(body)
+    whereClause = getWhereQuery(bodyDict, schemaDict)
+    sql = selectClause + ' ' + fromClause + ' ' + whereClause
+    return sql
 
 # Input Datalog query
 # Note: 1. each facts are seperated by ', '
 #       2. head and body are seperated by '：-'
 #       3. input: datalog query, factlist, schemalist
-datalog =  'r1(a,b):-fact1(x,a), fact2(20,y), fact3(y,b).'
-factList =['fact1(2,1)','fact1(2,3)','fact1(2,4)','fact2(20,10)','fact2(20,30)','fact2(20,40)', 'fact3(22,21)','fact3(22,23)','fact3(22,24)']
-inputSchemas = ['fact1(x,a)', 'fact2(a,y)', 'fact3(y,b)']
-mainCode(datalog,factList,inputSchemas)
+datalog =  'r1(a,b):-fact1(x,a), fact2(x,y), fact3(y,b).'
+inputSchemas = 'fact1(x,a), fact2(a,y), fact3(y,b)'
+result = mainCode(datalog,inputSchemas)
+print(result)
